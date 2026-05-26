@@ -335,7 +335,7 @@ pkucw agent mcp
 - `run_cli`
 - `cli_<command_path>`：自动从 argparse 命令树生成的 CLI tool，例如 `cli_status`、`cli_courses_list`、`cli_assignments_show`、`cli_grades_list`
 
-默认 MCP 只读。只有 `config.agent.allow_modify_subscriptions=true` 时，agent 才能调用 `update_course_subscription` 修改课程订阅；token 和 webhook secret 不会通过 `list_subscriptions` 暴露。
+MCP 统一允许调用这些 tools；token 和 webhook secret 不会通过 `list_subscriptions` 暴露。
 
 ### MCP access to every CLI command
 
@@ -362,14 +362,12 @@ pkucw agent mcp
 }
 ```
 
-安全默认值：
+执行策略：
 
-- 只读命令默认可执行，例如 `status`、`courses list`、`announcements list`、`assignments show`、`grades list`。
-- 有副作用命令会列出但默认拒绝执行，例如 `login`、`logout`、`use`、`download`、`submit`、`monitor scan`、`monitor subscribe-course`、`agent token`。
-- 长运行命令会列出但默认拒绝执行，例如 `monitor run`、`agent serve`、`agent mcp`。
-- 要允许副作用命令，需要同时设置 `config.agent.allow_cli_mutations=true` 并在 tool 参数中传 `allow_mutation=true`。
-- 要允许长运行命令，需要同时设置 `config.agent.allow_cli_long_running=true` 并在 tool 参数中传 `allow_long_running=true`。
-- `--password-stdin`、`--final-submit`、`--confirm-final-submit` 等高风险参数不允许通过 MCP bridge 传入。
+- 所有 CLI 命令统一暴露并允许调用，包括查询、下载、提交、monitor 和 agent 子命令。
+- `list_cli_commands` 会标注每个命令的 `read_only` 与 `long_running`，供 agent 自己判断交互方式。
+- `run_cli` 和 `cli_<command_path>` 会捕获 CLI stdout/stderr，并尽量解析 `--json` 输出。
+- MCP bridge 不额外做权限门槛；长运行命令例如 `monitor run`、`agent serve` 调用后会按 CLI 行为持续运行。
 
 ## Hermes integration test
 

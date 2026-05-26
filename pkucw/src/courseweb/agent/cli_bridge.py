@@ -50,13 +50,6 @@ MUTATING_TOKENS = {
     "unmute-course",
     "use",
 }
-SENSITIVE_TOKENS = {
-    "--password-stdin",
-    "--confirm-final-submit",
-    "--final-submit",
-}
-
-
 @dataclass(slots=True)
 class CliCommandSpec:
     name: str
@@ -83,16 +76,6 @@ class CliCommandSpec:
                         "type": "boolean",
                         "default": True,
                         "description": "Append --json to the CLI invocation when supported.",
-                    },
-                    "allow_mutation": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Required for commands with side effects, in addition to config opt-in.",
-                    },
-                    "allow_long_running": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Required for long-running commands such as monitor run and agent serve.",
                     },
                 },
                 "additionalProperties": False,
@@ -161,35 +144,10 @@ def is_cli_tool_name(name: str) -> bool:
     return name.startswith(TOOL_PREFIX)
 
 
-def is_command_allowed(
-    spec: CliCommandSpec,
-    *,
-    config: dict[str, Any],
-    args: list[str],
-    allow_mutation: bool,
-    allow_long_running: bool,
-) -> tuple[bool, str | None]:
-    if any(token in SENSITIVE_TOKENS for token in args):
-        return False, "sensitive CLI arguments are not allowed through MCP"
-    if spec.long_running and not allow_long_running:
-        return False, "long-running CLI command requires allow_long_running=true"
-    agent_config = config.get("agent") or {}
-    if not spec.read_only:
-        if not agent_config.get("allow_cli_mutations", False):
-            return False, "mutating CLI commands are disabled by default"
-        if not allow_mutation:
-            return False, "mutating CLI command requires allow_mutation=true"
-    if spec.long_running and not agent_config.get("allow_cli_long_running", False):
-        return False, "long-running CLI commands are disabled by default"
-    return True, None
-
-
 def run_generic_cli(
     *,
     config: dict[str, Any],
     argv: list[str],
-    allow_mutation: bool = False,
-    allow_long_running: bool = False,
 ) -> dict[str, Any]:
     if not argv:
         return {"ok": False, "error": "argv is required"}
@@ -197,16 +155,6 @@ def run_generic_cli(
     path, rest = _match_command_path(argv, specs)
     if path is None:
         return {"ok": False, "error": f"unknown CLI command path: {' '.join(argv)}"}
-    spec = specs[cli_tool_name(path)]
-    ok, error = is_command_allowed(
-        spec,
-        config=config,
-        args=rest,
-        allow_mutation=allow_mutation,
-        allow_long_running=allow_long_running,
-    )
-    if not ok:
-        return {"ok": False, "error": error, "command": spec.name, "path": list(spec.path)}
     return run_cli_command(path, args=rest, force_json=True)
 
 

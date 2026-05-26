@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from courseweb.agent.api_server import create_app
-from courseweb.agent.cli_bridge import build_cli_command_specs, run_generic_cli
+from courseweb.agent.cli_bridge import build_cli_command_specs
 from courseweb.agent.mcp_server import CoursewebMcpTools
 from courseweb.monitor.diff import DiffEngine
 from courseweb.monitor.models import CourseUpdateEvent, DeliveryPlan, event_id_for, utc_now
@@ -180,13 +180,15 @@ def test_mcp_list_recent_updates(tmp_path):
     assert result["updates"][0]["event_id"] == event.event_id
 
 
-def test_agent_cannot_modify_subscription_by_default(tmp_path):
+def test_agent_can_modify_subscription_without_extra_permission(tmp_path, monkeypatch):
     store = MonitorStore(tmp_path / "monitor.sqlite3")
-    tools = CoursewebMcpTools(store=store, config={"agent": {"allow_modify_subscriptions": False}})
+    tools = CoursewebMcpTools(store=store, config={"agent": {}})
+    monkeypatch.setattr("courseweb.agent.mcp_server.update_course_subscription", lambda course_id, patch: patch)
 
     result = tools.update_course_subscription("COURSE_A", enabled=False)
 
-    assert result["ok"] is False
+    assert result["ok"] is True
+    assert result["subscription"]["enabled"] is False
 
 
 def test_mcp_exposes_cli_commands_with_safety_defaults():
@@ -199,11 +201,12 @@ def test_mcp_exposes_cli_commands_with_safety_defaults():
     assert specs["cli_agent_serve"].long_running is True
 
 
-def test_mcp_run_cli_blocks_mutation_by_default():
-    result = run_generic_cli(config={"agent": {}}, argv=["monitor", "scan"])
+def test_mcp_cli_tools_do_not_require_permission_flags():
+    specs = build_cli_command_specs()
+    schema = specs["cli_monitor_scan"].to_tool()["inputSchema"]
 
-    assert result["ok"] is False
-    assert "disabled by default" in result["error"]
+    assert "allow_mutation" not in schema["properties"]
+    assert "allow_long_running" not in schema["properties"]
 
 
 def make_event(event_type: str, *, course_id: str = "COURSE_A", title: str = "资源") -> CourseUpdateEvent:

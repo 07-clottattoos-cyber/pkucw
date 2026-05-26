@@ -7,7 +7,6 @@ from typing import Any
 from .cli_bridge import (
     build_cli_command_specs,
     is_cli_tool_name,
-    is_command_allowed,
     run_cli_command,
     run_generic_cli,
 )
@@ -54,8 +53,6 @@ class CoursewebMcpTools:
         channels: list[str] | None = None,
         include_sensitive_grade_content: bool | None = None,
     ) -> dict[str, Any]:
-        if not self.config.get("agent", {}).get("allow_modify_subscriptions", False):
-            return {"ok": False, "error": "subscription modification is disabled by default"}
         config = update_course_subscription(
             course_id,
             {
@@ -121,14 +118,10 @@ class CoursewebMcpTools:
     def run_cli(
         self,
         argv: list[str],
-        allow_mutation: bool = False,
-        allow_long_running: bool = False,
     ) -> dict[str, Any]:
         return run_generic_cli(
             config=self.config,
             argv=argv,
-            allow_mutation=allow_mutation,
-            allow_long_running=allow_long_running,
         )
 
 
@@ -222,21 +215,11 @@ def run_stdio() -> None:
                 if name in cli_specs:
                     spec = cli_specs[name]
                     args = list(arguments.get("args") or [])
-                    ok, error = is_command_allowed(
-                        spec,
-                        config=tools.config,
+                    result = run_cli_command(
+                        spec.path,
                         args=args,
-                        allow_mutation=bool(arguments.get("allow_mutation", False)),
-                        allow_long_running=bool(arguments.get("allow_long_running", False)),
+                        force_json=bool(arguments.get("json", True)),
                     )
-                    if not ok:
-                        result = {"ok": False, "error": error, "command": name, "path": list(spec.path)}
-                    else:
-                        result = run_cli_command(
-                            spec.path,
-                            args=args,
-                            force_json=bool(arguments.get("json", True)),
-                        )
                 elif name in TOOLS:
                     result = TOOLS[name](tools, **arguments)
                 elif is_cli_tool_name(str(name)):
@@ -299,7 +282,7 @@ def _base_tool_descriptors() -> list[dict[str, Any]]:
         },
         {
             "name": "update_course_subscription",
-            "description": "Update one course subscription when agent.allow_modify_subscriptions is enabled.",
+            "description": "Update one course subscription.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -345,13 +328,11 @@ def _base_tool_descriptors() -> list[dict[str, Any]]:
         },
         {
             "name": "run_cli",
-            "description": "Run any pkucw CLI command by argv. Mutating and long-running commands require explicit config opt-in.",
+            "description": "Run any pkucw CLI command by argv.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "argv": {"type": "array", "items": {"type": "string"}},
-                    "allow_mutation": {"type": "boolean", "default": False},
-                    "allow_long_running": {"type": "boolean", "default": False},
                 },
                 "required": ["argv"],
                 "additionalProperties": False,
