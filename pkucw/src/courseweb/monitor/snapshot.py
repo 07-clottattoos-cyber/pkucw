@@ -9,6 +9,7 @@ from ..contents import scrape_contents
 from ..courses import CourseRecord, scrape_courses
 from ..grades import scrape_grades
 from ..recordings import scrape_recordings
+from ..session_runtime import ensure_live_session
 from ..state import load_session
 from .models import (
     AnnouncementSnapshot,
@@ -33,6 +34,7 @@ def collect_snapshots(
 ) -> list[CourseSnapshot]:
     if storage_state_path is None:
         session = load_session()
+        session = ensure_live_session(session, stale_after_seconds=0)
         if not session.storage_state:
             raise RuntimeError("没有可用的浏览器会话，请先运行 `pkucw login`。")
         storage_state_path = session.storage_state
