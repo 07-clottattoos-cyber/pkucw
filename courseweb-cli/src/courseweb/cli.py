@@ -38,6 +38,7 @@ from .courses import (
     scrape_courses,
     suggest_courses,
 )
+from .grades import GradeScrapeError, resolve_grade, scrape_grades
 from .models import CommandResult, SessionState
 from .output import render_payload
 from .recordings import (
@@ -249,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(
         dest="domain",
-        metavar="{completion,auth,accounts,login,logout,status,courses,ls,use,current,doctor,course,info,announcements,contents,assignments,recordings}",
+        metavar="{completion,auth,accounts,login,logout,status,courses,ls,use,current,doctor,course,info,announcements,contents,assignments,recordings,grades,monitor,agent}",
     )
 
     add_completion_parsers(subparsers, shared_parser)
@@ -260,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_context_parsers(subparsers, shared_parser)
     add_course_parsers(subparsers, shared_parser)
     add_top_level_course_resource_parsers(subparsers, shared_parser)
+    add_grade_parsers(subparsers, shared_parser)
+    add_monitor_parsers(subparsers, shared_parser)
+    add_agent_parsers(subparsers, shared_parser)
     add_agent_compat_parsers(subparsers, shared_parser)
 
     return parser
@@ -598,6 +602,104 @@ def add_top_level_course_resource_parsers(
     add_named_resource_parsers(subparsers, shared_parser, "contents", supports_submit=False)
     add_named_resource_parsers(subparsers, shared_parser, "assignments", supports_submit=True)
     add_recording_parsers(subparsers, shared_parser)
+
+
+def add_grade_parsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    shared_parser: argparse.ArgumentParser,
+) -> None:
+    grades_parser = subparsers.add_parser(
+        "grades",
+        help="查看课程成绩。",
+        aliases=["grade"],
+        parents=[shared_parser],
+    )
+    _add_optional_course_argument(grades_parser)
+    grades_subparsers = grades_parser.add_subparsers(dest="grades_command")
+    grades_parser.set_defaults(handler=handle_course_grades_list, course=None)
+
+    list_parser = grades_subparsers.add_parser(
+        "list",
+        help="列出课程成绩。",
+        aliases=["ls"],
+        parents=[shared_parser],
+    )
+    list_parser.add_argument("course", nargs="?", help="课程 ID、短标识或标题片段。")
+    _add_optional_course_argument(list_parser)
+    list_parser.set_defaults(handler=handle_course_grades_list)
+
+    show_parser = grades_subparsers.add_parser(
+        "show",
+        help="查看单项成绩。",
+        aliases=["get"],
+        parents=[shared_parser],
+    )
+    show_parser.add_argument("course", nargs="?", help="课程 ID、短标识或标题片段。")
+    _add_optional_course_argument(show_parser)
+    show_parser.add_argument("grade", help="成绩项目 ID 或标题片段。")
+    show_parser.set_defaults(handler=handle_course_grades_show)
+
+
+def add_monitor_parsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    shared_parser: argparse.ArgumentParser,
+) -> None:
+    monitor_parser = subparsers.add_parser("monitor", help="长期监控课程网资源。", parents=[shared_parser])
+    monitor_subparsers = monitor_parser.add_subparsers(dest="monitor_command")
+
+    scan_parser = monitor_subparsers.add_parser("scan", help="执行一次扫描并写入 baseline/events。", parents=[shared_parser])
+    scan_parser.set_defaults(handler=handle_monitor_scan)
+
+    run_parser = monitor_subparsers.add_parser("run", help="启动长期轮询监控。", parents=[shared_parser])
+    run_parser.set_defaults(handler=handle_monitor_run)
+
+    status_parser = monitor_subparsers.add_parser("status", help="查看监控状态。", parents=[shared_parser])
+    status_parser.set_defaults(handler=handle_monitor_status)
+
+    updates_parser = monitor_subparsers.add_parser("updates", help="列出最近更新。", parents=[shared_parser])
+    updates_parser.add_argument("--since", help="ISO 时间下限。")
+    updates_parser.add_argument("--course-id", help="课程 ID。")
+    updates_parser.add_argument("--event-type", action="append", help="事件类型，可重复。")
+    updates_parser.add_argument("--limit", type=int, default=50, help="返回数量。")
+    updates_parser.set_defaults(handler=handle_monitor_updates)
+
+    subscribe_parser = monitor_subparsers.add_parser("subscribe-course", help="配置课程级订阅。", parents=[shared_parser])
+    subscribe_parser.add_argument("course_id", help="课程 ID。")
+    subscribe_parser.add_argument("--mode", choices=["realtime", "digest", "manual", "hybrid"], help="订阅模式。")
+    subscribe_parser.add_argument("--channel", action="append", dest="channels", help="通知通道，可重复。")
+    subscribe_parser.add_argument("--event-type", action="append", dest="event_types", help="事件类型，可重复。")
+    subscribe_parser.add_argument("--include-sensitive-grade-content", action="store_true", help="允许该课程推送具体成绩内容。")
+    subscribe_parser.set_defaults(handler=handle_monitor_subscribe_course)
+
+    mute_parser = monitor_subparsers.add_parser("mute-course", help="静音某门课。", parents=[shared_parser])
+    mute_parser.add_argument("course_id", help="课程 ID。")
+    mute_parser.set_defaults(handler=handle_monitor_mute_course)
+
+    unmute_parser = monitor_subparsers.add_parser("unmute-course", help="取消某门课静音。", parents=[shared_parser])
+    unmute_parser.add_argument("course_id", help="课程 ID。")
+    unmute_parser.set_defaults(handler=handle_monitor_unmute_course)
+
+    test_parser = monitor_subparsers.add_parser("test-notify", help="发送一条本地测试通知。", parents=[shared_parser])
+    test_parser.set_defaults(handler=handle_monitor_test_notify)
+
+
+def add_agent_parsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    shared_parser: argparse.ArgumentParser,
+) -> None:
+    agent_parser = subparsers.add_parser("agent", help="Agent 信息源与实时事件服务。", parents=[shared_parser])
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command")
+
+    serve_parser = agent_subparsers.add_parser("serve", help="启动 HTTP/SSE agent server。", parents=[shared_parser])
+    serve_parser.add_argument("--host", default=None, help="监听地址，默认 127.0.0.1。")
+    serve_parser.add_argument("--port", type=int, default=None, help="监听端口。")
+    serve_parser.set_defaults(handler=handle_agent_serve)
+
+    mcp_parser = agent_subparsers.add_parser("mcp", help="启动 MCP stdio server。", parents=[shared_parser])
+    mcp_parser.set_defaults(handler=handle_agent_mcp)
+
+    token_parser = agent_subparsers.add_parser("token", help="生成或显示 agent server bearer token。", parents=[shared_parser])
+    token_parser.set_defaults(handler=handle_agent_token)
 
 
 def add_named_resource_parsers(
@@ -1035,6 +1137,174 @@ def handle_download_recording_shortcut(args: argparse.Namespace) -> CommandResul
     if getattr(args, "latest", False) or not getattr(args, "recording", None):
         return handle_course_recordings_download_latest(args)
     return handle_course_recordings_download(args)
+
+
+def handle_course_grades_list(args: argparse.Namespace) -> CommandResult:
+    session = load_session()
+    auth_error = _require_authenticated_session(session)
+    if auth_error is not None:
+        return auth_error
+    course, error = _resolve_course_from_query(session, _course_query(args))
+    if error is not None:
+        return error
+    assert course is not None
+    try:
+        info, grades = scrape_grades(storage_state_path=session.storage_state or "", course=course, headless=True)
+    except GradeScrapeError as exc:
+        return CommandResult(ok=False, message=str(exc), payload={})
+    return CommandResult(
+        ok=True,
+        message=f"找到 {len(grades)} 条成绩。",
+        payload={
+            "course": course.to_dict(),
+            "page": {
+                "title": info.page_title,
+                "url": info.current_page_url,
+                "label": info.current_page_label,
+            },
+            "grades": [grade.to_dict() for grade in grades],
+        },
+    )
+
+
+def handle_course_grades_show(args: argparse.Namespace) -> CommandResult:
+    session = load_session()
+    auth_error = _require_authenticated_session(session)
+    if auth_error is not None:
+        return auth_error
+    course, error = _resolve_course_from_query(session, _course_query(args))
+    if error is not None:
+        return error
+    assert course is not None
+    try:
+        _, grades = scrape_grades(storage_state_path=session.storage_state or "", course=course, headless=True)
+    except GradeScrapeError as exc:
+        return CommandResult(ok=False, message=str(exc), payload={})
+    grade = resolve_grade(grades, args.grade)
+    if grade is None:
+        return CommandResult(ok=False, message="没有找到匹配的成绩项目。", payload={"course": course.to_dict()})
+    return CommandResult(ok=True, message=grade.title, payload={"course": course.to_dict(), "grade": grade.to_dict()})
+
+
+def handle_monitor_scan(args: argparse.Namespace) -> CommandResult:
+    from .monitor.service import MonitorService
+
+    result = MonitorService().scan(notify=True)
+    return CommandResult(ok=True, message=f"扫描完成，生成 {result['events']} 个事件。", payload=result)
+
+
+def handle_monitor_run(args: argparse.Namespace) -> CommandResult:
+    from .monitor.service import MonitorService
+
+    MonitorService().run_forever()
+    return CommandResult(ok=True, message="monitor stopped", payload={})
+
+
+def handle_monitor_status(args: argparse.Namespace) -> CommandResult:
+    from .monitor.config import database_path
+    from .monitor.store import MonitorStore
+
+    store = MonitorStore(database_path())
+    return CommandResult(ok=True, message="监控状态。", payload={"status": store.status()})
+
+
+def handle_monitor_updates(args: argparse.Namespace) -> CommandResult:
+    from .monitor.config import database_path
+    from .monitor.store import MonitorStore
+
+    store = MonitorStore(database_path())
+    events = store.list_events(
+        course_id=args.course_id,
+        event_types=args.event_type,
+        since=args.since,
+        limit=args.limit,
+    )
+    return CommandResult(ok=True, message=f"找到 {len(events)} 条更新。", payload={"updates": [event.to_dict() for event in events]})
+
+
+def handle_monitor_subscribe_course(args: argparse.Namespace) -> CommandResult:
+    from .monitor.config import update_course_subscription
+
+    patch = {
+        "enabled": True,
+        "mode": args.mode,
+        "channels": args.channels,
+        "event_types": args.event_types,
+        "include_sensitive_grade_content": True if args.include_sensitive_grade_content else None,
+    }
+    subscription = update_course_subscription(args.course_id, patch)
+    return CommandResult(ok=True, message=f"已更新课程订阅：{args.course_id}", payload={"subscription": subscription})
+
+
+def handle_monitor_mute_course(args: argparse.Namespace) -> CommandResult:
+    from .monitor.config import update_course_subscription
+
+    subscription = update_course_subscription(args.course_id, {"enabled": False, "channels": [], "event_types": []})
+    return CommandResult(ok=True, message=f"已静音课程：{args.course_id}", payload={"subscription": subscription})
+
+
+def handle_monitor_unmute_course(args: argparse.Namespace) -> CommandResult:
+    from .monitor.config import update_course_subscription
+
+    subscription = update_course_subscription(args.course_id, {"enabled": True})
+    return CommandResult(ok=True, message=f"已取消静音课程：{args.course_id}", payload={"subscription": subscription})
+
+
+def handle_monitor_test_notify(args: argparse.Namespace) -> CommandResult:
+    from .monitor.models import CourseUpdateEvent, event_id_for, utc_now
+    from .monitor.service import MonitorService
+
+    event = CourseUpdateEvent(
+        event_id=event_id_for(
+            course_id="TEST",
+            resource_type="assignment",
+            resource_id="test",
+            event_type="assignment.created",
+            new_hash="test",
+        ),
+        event_type="assignment.created",
+        course_id="TEST",
+        course_name="测试课程",
+        semester=None,
+        resource_type="assignment",
+        resource_id="test",
+        resource_title="测试作业",
+        source_url=None,
+        old_hash=None,
+        new_hash="test",
+        old_value=None,
+        new_value={"title": "测试作业"},
+        changed_fields=["created"],
+        detected_at=utc_now(),
+        severity="normal",
+        summary="测试课程 新增作业：测试作业。",
+        raw=None,
+    )
+    service = MonitorService(snapshot_provider=lambda: [])
+    service.store.add_events([event])
+    deliveries = service._deliver([event])
+    return CommandResult(ok=True, message="测试通知已发送。", payload={"event": event.to_dict(), "deliveries": deliveries})
+
+
+def handle_agent_serve(args: argparse.Namespace) -> CommandResult:
+    from .agent.api_server import serve
+
+    serve(host=args.host, port=args.port)
+    return CommandResult(ok=True, message="agent server stopped", payload={})
+
+
+def handle_agent_mcp(args: argparse.Namespace) -> CommandResult:
+    from .agent.mcp_server import run_stdio
+
+    run_stdio()
+    return CommandResult(ok=True, message="mcp server stopped", payload={})
+
+
+def handle_agent_token(args: argparse.Namespace) -> CommandResult:
+    from .agent.schemas import generate_token
+
+    token = generate_token()
+    return CommandResult(ok=True, message="已生成 agent token。", payload={"token": token})
 
 
 def handle_auth_login(args: argparse.Namespace) -> CommandResult:
