@@ -110,4 +110,5 @@ def serve(host: str | None = None, port: int | None = None) -> None:
         host=host or agent.get("host") or "127.0.0.1",
         port=int(port or agent.get("port") or 8765),
         log_level="info",
+        access_log=False,
     )
