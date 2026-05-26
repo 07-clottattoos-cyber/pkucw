@@ -69,6 +69,7 @@ class Notifier:
         if secret:
             digest = hmac.new(str(secret).encode("utf-8"), body, hashlib.sha256).hexdigest()
             headers["X-Courseweb-Signature"] = f"sha256={digest}"
+            headers["X-Webhook-Signature"] = digest
         request = Request(url, data=body, headers=headers, method="POST")
         with urlopen(request, timeout=10) as response:
             response.read()
