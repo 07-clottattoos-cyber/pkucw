@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from courseweb.agent.api_server import create_app
+from courseweb.agent.cli_bridge import build_cli_command_specs, run_generic_cli
 from courseweb.agent.mcp_server import CoursewebMcpTools
 from courseweb.monitor.diff import DiffEngine
 from courseweb.monitor.models import CourseUpdateEvent, DeliveryPlan, event_id_for, utc_now
@@ -186,6 +187,23 @@ def test_agent_cannot_modify_subscription_by_default(tmp_path):
     result = tools.update_course_subscription("COURSE_A", enabled=False)
 
     assert result["ok"] is False
+
+
+def test_mcp_exposes_cli_commands_with_safety_defaults():
+    specs = build_cli_command_specs()
+
+    assert "cli_status" in specs
+    assert "cli_monitor_scan" in specs
+    assert specs["cli_status"].read_only is True
+    assert specs["cli_monitor_scan"].read_only is False
+    assert specs["cli_agent_serve"].long_running is True
+
+
+def test_mcp_run_cli_blocks_mutation_by_default():
+    result = run_generic_cli(config={"agent": {}}, argv=["monitor", "scan"])
+
+    assert result["ok"] is False
+    assert "disabled by default" in result["error"]
 
 
 def make_event(event_type: str, *, course_id: str = "COURSE_A", title: str = "资源") -> CourseUpdateEvent:

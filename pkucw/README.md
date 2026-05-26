@@ -331,8 +331,45 @@ pkucw agent mcp
 - `update_course_subscription`
 - `acknowledge_update`
 - `search_course_resources`
+- `list_cli_commands`
+- `run_cli`
+- `cli_<command_path>`：自动从 argparse 命令树生成的 CLI tool，例如 `cli_status`、`cli_courses_list`、`cli_assignments_show`、`cli_grades_list`
 
 默认 MCP 只读。只有 `config.agent.allow_modify_subscriptions=true` 时，agent 才能调用 `update_course_subscription` 修改课程订阅；token 和 webhook secret 不会通过 `list_subscriptions` 暴露。
+
+### MCP access to every CLI command
+
+`pkucw agent mcp` 会把现有 CLI 命令树暴露给 agent：
+
+```json
+{
+  "name": "cli_assignments_show",
+  "arguments": {
+    "args": ["--course", "COURSE_ID", "作业标题片段"],
+    "json": true
+  }
+}
+```
+
+也可以使用通用入口：
+
+```json
+{
+  "name": "run_cli",
+  "arguments": {
+    "argv": ["assignments", "show", "--course", "COURSE_ID", "作业标题片段"]
+  }
+}
+```
+
+安全默认值：
+
+- 只读命令默认可执行，例如 `status`、`courses list`、`announcements list`、`assignments show`、`grades list`。
+- 有副作用命令会列出但默认拒绝执行，例如 `login`、`logout`、`use`、`download`、`submit`、`monitor scan`、`monitor subscribe-course`、`agent token`。
+- 长运行命令会列出但默认拒绝执行，例如 `monitor run`、`agent serve`、`agent mcp`。
+- 要允许副作用命令，需要同时设置 `config.agent.allow_cli_mutations=true` 并在 tool 参数中传 `allow_mutation=true`。
+- 要允许长运行命令，需要同时设置 `config.agent.allow_cli_long_running=true` 并在 tool 参数中传 `allow_long_running=true`。
+- `--password-stdin`、`--final-submit`、`--confirm-final-submit` 等高风险参数不允许通过 MCP bridge 传入。
 
 ## Hermes integration test
 

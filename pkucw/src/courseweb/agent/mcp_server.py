@@ -4,6 +4,13 @@ import json
 import sys
 from typing import Any
 
+from .cli_bridge import (
+    build_cli_command_specs,
+    is_cli_tool_name,
+    is_command_allowed,
+    run_cli_command,
+    run_generic_cli,
+)
 from ..monitor.config import database_path, load_config, update_course_subscription
 from ..monitor.store import MonitorStore
 from .schemas import public_subscription
@@ -96,6 +103,34 @@ class CoursewebMcpTools:
                         )
         return {"results": results}
 
+    def list_cli_commands(self) -> dict[str, Any]:
+        specs = build_cli_command_specs()
+        return {
+            "commands": [
+                {
+                    "tool": spec.name,
+                    "path": list(spec.path),
+                    "usage": spec.usage,
+                    "read_only": spec.read_only,
+                    "long_running": spec.long_running,
+                }
+                for spec in specs.values()
+            ]
+        }
+
+    def run_cli(
+        self,
+        argv: list[str],
+        allow_mutation: bool = False,
+        allow_long_running: bool = False,
+    ) -> dict[str, Any]:
+        return run_generic_cli(
+            config=self.config,
+            argv=argv,
+            allow_mutation=allow_mutation,
+            allow_long_running=allow_long_running,
+        )
+
 
 TOOLS = {
     "list_courses": CoursewebMcpTools.list_courses,
@@ -106,6 +141,8 @@ TOOLS = {
     "update_course_subscription": CoursewebMcpTools.update_course_subscription,
     "acknowledge_update": CoursewebMcpTools.acknowledge_update,
     "search_course_resources": CoursewebMcpTools.search_course_resources,
+    "list_cli_commands": CoursewebMcpTools.list_cli_commands,
+    "run_cli": CoursewebMcpTools.run_cli,
 }
 RESOURCES = [
     "courseweb://courses",
@@ -122,6 +159,7 @@ PROMPTS = [
 
 def run_stdio() -> None:
     tools = CoursewebMcpTools()
+    cli_specs = build_cli_command_specs()
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -137,8 +175,12 @@ def run_stdio() -> None:
                     "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
                 }
             elif method == "tools/list":
+                cli_tools = [spec.to_tool() for spec in cli_specs.values()]
                 response["result"] = {
-                    "tools": [{"name": name, "description": f"pkucw {name}"} for name in TOOLS]
+                    "tools": [
+                        *_base_tool_descriptors(),
+                        *cli_tools,
+                    ]
                 }
             elif method == "resources/list":
                 response["result"] = {
@@ -177,15 +219,145 @@ def run_stdio() -> None:
             elif method == "tools/call":
                 name = params.get("name")
                 arguments = params.get("arguments") or {}
-                if name not in TOOLS:
+                if name in cli_specs:
+                    spec = cli_specs[name]
+                    args = list(arguments.get("args") or [])
+                    ok, error = is_command_allowed(
+                        spec,
+                        config=tools.config,
+                        args=args,
+                        allow_mutation=bool(arguments.get("allow_mutation", False)),
+                        allow_long_running=bool(arguments.get("allow_long_running", False)),
+                    )
+                    if not ok:
+                        result = {"ok": False, "error": error, "command": name, "path": list(spec.path)}
+                    else:
+                        result = run_cli_command(
+                            spec.path,
+                            args=args,
+                            force_json=bool(arguments.get("json", True)),
+                        )
+                elif name in TOOLS:
+                    result = TOOLS[name](tools, **arguments)
+                elif is_cli_tool_name(str(name)):
+                    raise ValueError(f"unknown CLI tool: {name}")
+                else:
                     raise ValueError(f"unknown tool: {name}")
-                result = TOOLS[name](tools, **arguments)
                 response["result"] = {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}
             else:
                 response["result"] = {}
         except Exception as exc:
             response["error"] = {"code": -32000, "message": str(exc)}
         print(json.dumps(response, ensure_ascii=False), flush=True)
+
+
+def _base_tool_descriptors() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "list_courses",
+            "description": "List courses from the monitor snapshot store.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "get_course_snapshot",
+            "description": "Get the latest stored CourseSnapshot for a course.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"course_id": {"type": "string"}},
+                "required": ["course_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_recent_updates",
+            "description": "List recent stored CourseUpdateEvent records.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "course_id": {"type": ["string", "null"]},
+                    "event_types": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "since": {"type": ["string", "null"]},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "get_update_detail",
+            "description": "Read one stored CourseUpdateEvent by event_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"event_id": {"type": "string"}},
+                "required": ["event_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_subscriptions",
+            "description": "List subscription configuration with secrets redacted.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "update_course_subscription",
+            "description": "Update one course subscription when agent.allow_modify_subscriptions is enabled.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "course_id": {"type": "string"},
+                    "enabled": {"type": ["boolean", "null"]},
+                    "event_types": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "mode": {"type": ["string", "null"]},
+                    "channels": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "include_sensitive_grade_content": {"type": ["boolean", "null"]},
+                },
+                "required": ["course_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "acknowledge_update",
+            "description": "Mark a stored update as acknowledged.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"event_id": {"type": "string"}},
+                "required": ["event_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "search_course_resources",
+            "description": "Search stored monitor snapshots.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "course_id": {"type": ["string", "null"]},
+                    "resource_types": {"type": ["array", "null"], "items": {"type": "string"}},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_cli_commands",
+            "description": "List every pkucw CLI command exposed as MCP tools.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "name": "run_cli",
+            "description": "Run any pkucw CLI command by argv. Mutating and long-running commands require explicit config opt-in.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                    "allow_mutation": {"type": "boolean", "default": False},
+                    "allow_long_running": {"type": "boolean", "default": False},
+                },
+                "required": ["argv"],
+                "additionalProperties": False,
+            },
+        },
+    ]
 
 
 def _read_resource(tools: CoursewebMcpTools, uri: str | None) -> dict[str, Any]:
