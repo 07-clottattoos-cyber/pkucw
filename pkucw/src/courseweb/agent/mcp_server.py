@@ -107,6 +107,17 @@ TOOLS = {
     "acknowledge_update": CoursewebMcpTools.acknowledge_update,
     "search_course_resources": CoursewebMcpTools.search_course_resources,
 }
+RESOURCES = [
+    "courseweb://courses",
+    "courseweb://courses/{course_id}/snapshot",
+    "courseweb://updates/recent",
+    "courseweb://subscriptions",
+]
+PROMPTS = [
+    "summarize_today_updates",
+    "check_urgent_course_tasks",
+    "explain_course_changes",
+]
 
 
 def run_stdio() -> None:
@@ -129,6 +140,40 @@ def run_stdio() -> None:
                 response["result"] = {
                     "tools": [{"name": name, "description": f"pkucw {name}"} for name in TOOLS]
                 }
+            elif method == "resources/list":
+                response["result"] = {
+                    "resources": [
+                        {"uri": uri, "name": uri.removeprefix("courseweb://"), "mimeType": "application/json"}
+                        for uri in RESOURCES
+                    ]
+                }
+            elif method == "resources/read":
+                uri = params.get("uri")
+                result = _read_resource(tools, uri)
+                response["result"] = {
+                    "contents": [
+                        {
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": json.dumps(result, ensure_ascii=False),
+                        }
+                    ]
+                }
+            elif method == "prompts/list":
+                response["result"] = {
+                    "prompts": [{"name": name, "description": f"pkucw prompt: {name}"} for name in PROMPTS]
+                }
+            elif method == "prompts/get":
+                name = params.get("name")
+                response["result"] = {
+                    "description": f"pkucw prompt: {name}",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {"type": "text", "text": _prompt_text(str(name))},
+                        }
+                    ],
+                }
             elif method == "tools/call":
                 name = params.get("name")
                 arguments = params.get("arguments") or {}
@@ -141,3 +186,28 @@ def run_stdio() -> None:
         except Exception as exc:
             response["error"] = {"code": -32000, "message": str(exc)}
         print(json.dumps(response, ensure_ascii=False), flush=True)
+
+
+def _read_resource(tools: CoursewebMcpTools, uri: str | None) -> dict[str, Any]:
+    if uri == "courseweb://courses":
+        return tools.list_courses()
+    if uri == "courseweb://updates/recent":
+        return tools.list_recent_updates()
+    if uri == "courseweb://subscriptions":
+        return tools.list_subscriptions()
+    prefix = "courseweb://courses/"
+    suffix = "/snapshot"
+    if uri and uri.startswith(prefix) and uri.endswith(suffix):
+        course_id = uri[len(prefix) : -len(suffix)]
+        return tools.get_course_snapshot(course_id)
+    raise ValueError(f"unknown resource: {uri}")
+
+
+def _prompt_text(name: str) -> str:
+    if name == "summarize_today_updates":
+        return "Summarize today's pkucw course updates. Use list_recent_updates and group by course."
+    if name == "check_urgent_course_tasks":
+        return "Check urgent or important pkucw updates, especially assignment.deadline_changed and grade.updated."
+    if name == "explain_course_changes":
+        return "Explain the selected pkucw CourseUpdateEvent in user-facing language with privacy preserved."
+    raise ValueError(f"unknown prompt: {name}")

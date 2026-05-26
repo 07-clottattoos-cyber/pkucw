@@ -91,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     result = args.handler(args)
+    if result is None:
+        return 0
     data = result.to_dict()
     print(
         render_payload(
@@ -1296,14 +1298,14 @@ def handle_agent_serve(args: argparse.Namespace) -> CommandResult:
     from .agent.api_server import serve
 
     serve(host=args.host, port=args.port)
-    return CommandResult(ok=True, message="agent server stopped", payload={})
+    return None
 
 
 def handle_agent_mcp(args: argparse.Namespace) -> CommandResult:
     from .agent.mcp_server import run_stdio
 
     run_stdio()
-    return CommandResult(ok=True, message="mcp server stopped", payload={})
+    return None
 
 
 def handle_agent_token(args: argparse.Namespace) -> CommandResult:
