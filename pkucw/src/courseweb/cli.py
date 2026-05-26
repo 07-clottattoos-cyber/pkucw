@@ -1189,14 +1189,20 @@ def handle_course_grades_show(args: argparse.Namespace) -> CommandResult:
 def handle_monitor_scan(args: argparse.Namespace) -> CommandResult:
     from .monitor.service import MonitorService
 
-    result = MonitorService().scan(notify=True)
+    try:
+        result = MonitorService().scan(notify=True)
+    except Exception as exc:
+        return CommandResult(ok=False, message=_scrub_sensitive_message(str(exc)), payload={})
     return CommandResult(ok=True, message=f"扫描完成，生成 {result['events']} 个事件。", payload=result)
 
 
 def handle_monitor_run(args: argparse.Namespace) -> CommandResult:
     from .monitor.service import MonitorService
 
-    MonitorService().run_forever()
+    try:
+        MonitorService().run_forever()
+    except Exception as exc:
+        return CommandResult(ok=False, message=_scrub_sensitive_message(str(exc)), payload={})
     return CommandResult(ok=True, message="monitor stopped", payload={})
 
 
@@ -2681,6 +2687,22 @@ def _normalize_value(value: object) -> object:
     if isinstance(value, list):
         return [_normalize_value(item) for item in value]
     return value
+
+
+def _scrub_sensitive_message(message: str) -> str:
+    session = load_session()
+    values = [
+        session.account_username,
+        session.account_label,
+        session.storage_state,
+        str(storage_state_path()),
+        str(session_path()),
+    ]
+    scrubbed = message
+    for value in values:
+        if value:
+            scrubbed = scrubbed.replace(str(value), "<redacted>")
+    return scrubbed
 
 
 def _resolve_course_from_query(
