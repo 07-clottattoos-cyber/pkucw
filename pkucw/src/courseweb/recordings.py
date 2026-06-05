@@ -40,6 +40,7 @@ class RecordingItem:
     teacher: str | None
     watch_url: str
     course_id: str | None
+    course_title: str | None
     player_course_id: str | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +51,7 @@ class RecordingItem:
             "teacher": self.teacher,
             "watch_url": self.watch_url,
             "course_id": self.course_id,
+            "course_title": self.course_title,
             "player_course_id": self.player_course_id,
         }
 
@@ -181,44 +183,29 @@ def scrape_recordings(
             page = context.new_page()
             page.goto(menu_item["url"], wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_selector("body", state="attached", timeout=timeout_ms)
-            page_title = page.title()
-            current_page_url = page.url
-            raw_items = page.evaluate(
-                """
-                () => {
-                  const readText = (node) => (node?.textContent || '').replace(/\\s+/g, ' ').trim();
-                  const parseRowText = (value) => {
-                    const match = value.match(/^(.*?)\\s+时间:\\s*(.*?)\\s+教师:\\s*(.*?)\\s+操作:/);
-                    if (!match) return null;
-                    return {
-                      title: match[1].trim(),
-                      recorded_at: match[2].trim(),
-                      teacher: match[3].trim(),
-                    };
-                  };
+            first_page_url = _first_recordings_page_url(page)
+            if first_page_url and first_page_url != page.url:
+                page.goto(first_page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page_title = None
+            current_page_url = None
+            raw_items: list[dict[str, str | None]] = []
+            seen_page_urls: set[str] = set()
+            while True:
+                page.wait_for_selector("body", state="attached", timeout=timeout_ms)
+                page_url = page.url
+                if page_url in seen_page_urls:
+                    break
+                seen_page_urls.add(page_url)
+                if page_title is None:
+                    page_title = page.title()
+                if current_page_url is None:
+                    current_page_url = page_url
+                raw_items.extend(_extract_recording_rows(page))
 
-                  const rows = [...document.querySelectorAll('table tr, tbody tr')];
-                  return rows
-                    .map((row) => {
-                      const link = row.querySelector('a[href*="playVideo.action"]');
-                      if (!link) return null;
-                      const titleCell = readText(row.querySelector('th[scope="row"], th'));
-                      const dataCells = [...row.querySelectorAll('td .table-data-cell-value')]
-                        .map((cell) => readText(cell))
-                        .filter(Boolean);
-                      const rowText = readText(row);
-                      const parsed = parseRowText(rowText) || {};
-                      return {
-                        title: titleCell || parsed.title || readText(link),
-                        recorded_at: dataCells[0] || parsed.recorded_at || null,
-                        teacher: dataCells[1] || parsed.teacher || null,
-                        watch_url: new URL(link.getAttribute('href') || '', window.location.href).href,
-                      };
-                    })
-                    .filter((item) => item && item.title && item.watch_url);
-                }
-                """
-            )
+                next_page_url = _next_recordings_page_url(page)
+                if not next_page_url or next_page_url in seen_page_urls:
+                    break
+                page.goto(next_page_url, wait_until="domcontentloaded", timeout=timeout_ms)
             context.close()
             browser.close()
     except PlaywrightTimeoutError as exc:
@@ -228,12 +215,14 @@ def scrape_recordings(
 
     recording_info = CourseInfo(
         course=info.course,
-        page_title=page_title,
-        current_page_url=current_page_url,
+        page_title=page_title or info.page_title,
+        current_page_url=current_page_url or menu_item["url"],
         current_page_label="课堂实录",
         menu_items=info.menu_items,
     )
-    return recording_info, [_normalize_recording(raw, course.id) for raw in raw_items]
+    return recording_info, _dedupe_recordings(
+        [_normalize_recording(raw, course.id, course.name or course.title) for raw in raw_items]
+    )
 
 
 def resolve_recording(items: list[RecordingItem], needle: str) -> RecordingItem | None:
@@ -254,6 +243,101 @@ def resolve_recording(items: list[RecordingItem], needle: str) -> RecordingItem 
             return item
 
     return None
+
+
+def _extract_recording_rows(page) -> list[dict[str, str | None]]:
+    return page.evaluate(
+        """
+        () => {
+          const readText = (node) => (node?.textContent || '').replace(/\\s+/g, ' ').trim();
+          const parseRowText = (value) => {
+            const match = value.match(/^(.*?)\\s+时间:\\s*(.*?)\\s+教师:\\s*(.*?)\\s+操作:/);
+            if (!match) return null;
+            return {
+              title: match[1].trim(),
+              recorded_at: match[2].trim(),
+              teacher: match[3].trim(),
+            };
+          };
+
+          const rows = [...document.querySelectorAll('table tr, tbody tr')];
+          return rows
+            .map((row) => {
+              const link = row.querySelector('a[href*="playVideo.action"]');
+              if (!link) return null;
+              const titleCell = readText(row.querySelector('th[scope="row"], th'));
+              const dataCells = [...row.querySelectorAll('td .table-data-cell-value')]
+                .map((cell) => readText(cell))
+                .filter(Boolean);
+              const rowText = readText(row);
+              const parsed = parseRowText(rowText) || {};
+              return {
+                title: titleCell || parsed.title || readText(link),
+                recorded_at: dataCells[0] || parsed.recorded_at || null,
+                teacher: dataCells[1] || parsed.teacher || null,
+                watch_url: new URL(link.getAttribute('href') || '', window.location.href).href,
+              };
+            })
+            .filter((item) => item && item.title && item.watch_url);
+        }
+        """
+    )
+
+
+def _next_recordings_page_url(page) -> str | None:
+    return page.evaluate(
+        """
+        () => {
+          const readText = (node) => (node?.textContent || '').replace(/\\s+/g, ' ').trim();
+          const readLabel = (link) => [
+            readText(link),
+            link.getAttribute('title') || '',
+            link.getAttribute('aria-label') || '',
+            link.querySelector('img')?.getAttribute('alt') || '',
+          ].join(' ').replace(/\\s+/g, ' ').trim();
+          const links = [...document.querySelectorAll('a.pagelink, a')];
+          const next = links.find((link) => {
+            const label = readLabel(link);
+            return /(下一页|Next(?: Page)?)/i.test(label) && !/最后一页|Last/i.test(label) && link.href;
+          });
+          return next ? next.href : null;
+        }
+        """
+    )
+
+
+def _first_recordings_page_url(page) -> str | None:
+    return page.evaluate(
+        """
+        () => {
+          const readText = (node) => (node?.textContent || '').replace(/\\s+/g, ' ').trim();
+          const readLabel = (link) => [
+            readText(link),
+            link.getAttribute('title') || '',
+            link.getAttribute('aria-label') || '',
+            link.querySelector('img')?.getAttribute('alt') || '',
+          ].join(' ').replace(/\\s+/g, ' ').trim();
+          const links = [...document.querySelectorAll('a.pagelink, a')];
+          const first = links.find((link) => {
+            const label = readLabel(link);
+            return /(第一页|First(?: Page)?)/i.test(label) && link.href;
+          });
+          return first ? first.href : null;
+        }
+        """
+    )
+
+
+def _dedupe_recordings(items: list[RecordingItem]) -> list[RecordingItem]:
+    seen: set[str] = set()
+    deduped: list[RecordingItem] = []
+    for item in items:
+        key = item.id or item.watch_url or f"{item.title}\0{item.recorded_at or ''}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def scrape_recording_detail(
@@ -594,13 +678,14 @@ def _segment_iv(playlist: HlsMediaPlaylist, index: int) -> bytes:
 
 
 def _resolve_output_paths(*, item: RecordingItem, output_path: str | None) -> tuple[Path, Path]:
+    default_name = _default_recording_name(item)
     if output_path:
         target = Path(output_path).expanduser().resolve()
     else:
-        target = Path.cwd() / _safe_name(item.title)
+        target = Path.cwd() / default_name
 
     if target.exists() and target.is_dir():
-        target = target / _safe_name(item.title)
+        target = target / default_name
 
     suffix = target.suffix.lower()
     if suffix == ".mp4":
@@ -852,7 +937,11 @@ def _sha256_for_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _normalize_recording(raw: dict[str, str | None], course_id: str | None) -> RecordingItem:
+def _normalize_recording(
+    raw: dict[str, str | None],
+    course_id: str | None,
+    course_title: str | None,
+) -> RecordingItem:
     metadata = _decode_watch_token(raw["watch_url"] or "")
     return RecordingItem(
         id=metadata.get("hqySubId") or _parse_token(raw["watch_url"] or ""),
@@ -861,6 +950,7 @@ def _normalize_recording(raw: dict[str, str | None], course_id: str | None) -> R
         teacher=(raw.get("teacher") or None),
         watch_url=raw["watch_url"] or "",
         course_id=course_id,
+        course_title=course_title,
         player_course_id=metadata.get("hqyCourseId"),
     )
 
@@ -900,3 +990,8 @@ def _find_recordings_menu(info: CourseInfo) -> dict[str, str | None] | None:
 def _safe_name(value: str) -> str:
     cleaned = INVALID_PATH_CHARS_RE.sub("_", value).strip().rstrip(".")
     return cleaned or "recording"
+
+
+def _default_recording_name(item: RecordingItem) -> str:
+    parts = [part for part in (item.course_title, item.title) if part]
+    return _safe_name("_".join(parts) if parts else item.title)
