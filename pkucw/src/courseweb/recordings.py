@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from http.client import IncompleteRead
 import json
 import re
 import shutil
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -392,7 +394,7 @@ def download_recording(
 
     key_bytes = None
     if playlist.key_url:
-        key_bytes = _request_bytes(
+        key_bytes = _request_bytes_with_retries(
             playlist.key_url,
             state=playback_state,
             headers=headers,
@@ -400,10 +402,25 @@ def download_recording(
         )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = target_path.with_suffix(target_path.suffix + ".part")
+    checkpoint_path = target_path.with_suffix(target_path.suffix + ".part.json")
+    completed_segments = _load_segment_checkpoint(
+        checkpoint_path,
+        playlist_url=detail.playlist_url,
+        total=len(playlist.segment_urls),
+    )
+    if completed_segments == 0:
+        partial_path.unlink(missing_ok=True)
+    elif not partial_path.exists():
+        completed_segments = 0
+        checkpoint_path.unlink(missing_ok=True)
+
     checkpoint_state = _init_download_checkpoint(total=len(playlist.segment_urls))
-    with target_path.open("wb") as handle:
+    with partial_path.open("ab") as handle:
         for index, segment_url in enumerate(playlist.segment_urls):
-            payload = _request_bytes(
+            if index < completed_segments:
+                continue
+            payload = _request_bytes_with_retries(
                 segment_url,
                 state=playback_state,
                 headers=headers,
@@ -416,6 +433,13 @@ def download_recording(
                     iv=_segment_iv(playlist, index),
                 )
             handle.write(payload)
+            handle.flush()
+            _save_segment_checkpoint(
+                checkpoint_path,
+                playlist_url=detail.playlist_url,
+                total=len(playlist.segment_urls),
+                completed=index + 1,
+            )
             if show_progress:
                 _emit_download_progress(
                     item=item,
@@ -429,6 +453,9 @@ def download_recording(
                     total=len(playlist.segment_urls),
                     state=checkpoint_state,
                 )
+
+    partial_path.replace(target_path)
+    checkpoint_path.unlink(missing_ok=True)
 
     if show_progress:
         print(file=sys.stderr)
@@ -631,6 +658,54 @@ def _request_bytes(
         return response.read()
 
 
+def _request_bytes_with_retries(
+    url: str,
+    *,
+    state: dict[str, Any],
+    headers: dict[str, str],
+    timeout_seconds: int,
+    attempts: int = 8,
+) -> bytes:
+    for attempt in range(1, attempts + 1):
+        try:
+            return _request_bytes(
+                url,
+                state=state,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+            )
+        except (HTTPError, URLError, IncompleteRead, TimeoutError, OSError) as exc:
+            if attempt == attempts:
+                raise RecordingScrapeError(
+                    f"媒体分片下载失败，已重试 {attempts} 次：{exc}"
+                ) from exc
+            time.sleep(min(2 ** (attempt - 1), 30))
+    raise AssertionError("unreachable")
+
+
+def _load_segment_checkpoint(path: Path, *, playlist_url: str, total: int) -> int:
+    try:
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+    if checkpoint.get("playlist_url") != playlist_url or checkpoint.get("total") != total:
+        return 0
+    completed = checkpoint.get("completed")
+    return completed if isinstance(completed, int) and 0 <= completed <= total else 0
+
+
+def _save_segment_checkpoint(path: Path, *, playlist_url: str, total: int, completed: int) -> None:
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(
+            {"playlist_url": playlist_url, "total": total, "completed": completed},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
 def _cookie_header_for_state(state: dict[str, Any], url: str) -> str:
     parsed = urlparse(url)
     host = parsed.hostname or ""
@@ -729,7 +804,7 @@ def _emit_download_checkpoint(
     last_emit_index = int(state.get("last_emit_index", 0))
     should_emit = False
 
-    # Keep long-running agent workflows alive without spamming logs.
+    # Keep long-running downloads observable without spamming logs.
     if index >= total:
         should_emit = True
     elif index == 1:

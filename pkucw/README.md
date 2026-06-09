@@ -45,50 +45,6 @@ pkucw --version
 ./scripts/smoke-test.sh
 ```
 
-## OpenClaw 安装
-
-如果你希望让 OpenClaw 同时安装 `pkucw` 工具和 `pkucw-cli` skill，可以直接运行：
-
-```bash
-git clone <GitHub 仓库地址> courseweb-cli
-cd courseweb-cli
-./scripts/install-openclaw.sh
-```
-
-默认行为：
-
-- 安装 `pkucw` 本体
-- 将 skill 安装到 `~/.openclaw/workspace/skills/pkucw-cli`
-- 默认用符号链接方式挂载 skill，方便后续跟随仓库更新
-
-常用覆写方式：
-
-```bash
-OPENCLAW_HOME=~/.openclaw ./scripts/install-openclaw.sh
-OPENCLAW_SKILLS_DIR=./.openclaw-skills ./scripts/install-openclaw.sh
-PKUCW_SKILL_INSTALL_MODE=copy ./scripts/install-openclaw.sh
-PKUCW_SKIP_TOOL_INSTALL=1 ./scripts/install-openclaw.sh
-```
-
-安装后可验证：
-
-```bash
-pkucw --version
-openclaw skills list | grep pkucw-cli
-```
-
-如果你要让 OpenClaw 代理自己完成安装，可以直接给它这段提示词：
-
-```text
-请在当前仓库安装 pkucw 和 pkucw-cli skill。
-要求：
-1. 运行 ./scripts/install-openclaw.sh
-2. 确认 pkucw --version 可用
-3. 确认 openclaw skills list 中能看到 pkucw-cli
-4. 如果失败，优先修复 PATH、Python、skill 目录问题
-5. 最后返回安装结果、pkucw 版本、skill 安装路径和验证命令输出摘要
-```
-
 ## 首次使用
 
 推荐流程：
@@ -142,7 +98,7 @@ pkucw grades list
 - 推荐统一加 `--json`
 - 命令名保持稳定，不建议 agent 去猜课程名
 - 建议先 `pkucw ls --current --json`，再 `pkucw use "<精确课程名>" --json`
-- OpenClaw 可配合 [pkucw skill](skills/pkucw-cli/SKILL.md) 一起使用
+- 通用 agent 工作流见 [pkucw skill](skills/pkucw-cli/SKILL.md)
 - 仓库根目录提供 `./pkucw` 和 `./pkucw-cli` 包装脚本，PATH 不稳定时 agent 可直接调用
 
 通知详情说明：
